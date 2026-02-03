@@ -8,7 +8,9 @@ import matplotlib.pyplot as plt
 import graphviz
 from bip_utils import (
     Bip39MnemonicGenerator, Bip39SeedGenerator,
-    Bip44, Bip49, Bip84, Bip86, Bip44Coins, Bip44Changes
+    Bip44, Bip49, Bip84, Bip86,
+    Bip44Coins, Bip49Coins, Bip84Coins, Bip86Coins, # <--- เพิ่มตรงนี้
+    Bip44Changes
 )
 
 # ==========================================
@@ -120,9 +122,13 @@ elif input_mode == "⌨️ Manual Hex":
     # Validation
     try:
         int(user_hex, 16)
+        # Allow slight length mismatch if user is typing, but warn
         if len(user_hex) * 4 != entropy_bits:
-            st.warning(f"Warning: Length mismatch. Expected {entropy_bits//4} chars.")
+             st.warning(f"Warning: Expected {entropy_bits//4} chars. Current: {len(user_hex)}")
         current_hex = user_hex
+        # Protect against empty string
+        if not current_hex: 
+             current_hex = "0"
         current_bin = bin(int(current_hex, 16))[2:].zfill(entropy_bits)
     except:
         st.error("Invalid Hex String")
@@ -137,7 +143,10 @@ elif input_mode == "0️⃣1️⃣ Manual Binary":
         st.error("Invalid Binary. Only 0 and 1 allowed.")
         st.stop()
     current_bin = user_bin
-    current_hex = hex(int(current_bin, 2))[2:]
+    try:
+        current_hex = hex(int(current_bin, 2))[2:]
+    except:
+        current_hex = "0"
 
 # Display Entropy
 col1, col2 = st.columns(2)
@@ -154,11 +163,19 @@ with col2:
 st.markdown("---")
 st.header("2. CHECKSUM CALCULATION")
 
-# Calculate Checksum manually to show the process
-entropy_bytes = binascii.unhexlify(current_hex.zfill(entropy_bits // 4))
-hash_bytes = hashlib.sha256(entropy_bytes).digest()
-hash_bin = "".join(f"{b:08b}" for b in hash_bytes)
-checksum_val = hash_bin[:checksum_bits]
+try:
+    # Calculate Checksum manually to show the process
+    # Pad hex to ensure it matches byte length
+    hex_len = entropy_bits // 4
+    padded_hex = current_hex.zfill(hex_len)
+    entropy_bytes = binascii.unhexlify(padded_hex)
+    
+    hash_bytes = hashlib.sha256(entropy_bytes).digest()
+    hash_bin = "".join(f"{b:08b}" for b in hash_bytes)
+    checksum_val = hash_bin[:checksum_bits]
+except Exception as e:
+    st.error(f"Waiting for valid input... ({e})")
+    st.stop()
 
 st.markdown(f"<div class='tech-box'>SHA256(Entropy) -> เอา {checksum_bits} บิตแรกมาทำเป็น Checksum เพื่อป้องกันการจดผิด</div>", unsafe_allow_html=True)
 
@@ -178,22 +195,28 @@ st.markdown("### 🧩 WORD SPLITTING (11 Bits per Word)")
 # Split into 11-bit chunks
 chunks = [final_bits[i:i+11] for i in range(0, len(final_bits), 11)]
 
-# Generate Mnemonic using Library
-mnemonic_gen = Bip39MnemonicGenerator()
-mnemonic_str = mnemonic_gen.FromEntropy(entropy_bytes).ToStr()
-words = mnemonic_str.split()
+try:
+    # Generate Mnemonic using Library
+    mnemonic_gen = Bip39MnemonicGenerator()
+    mnemonic_str = mnemonic_gen.FromEntropy(entropy_bytes).ToStr()
+    words = mnemonic_str.split()
+    
+    # Create a DataFrame for visualization
+    df_data = []
+    for i, chunk in enumerate(chunks):
+        if i < len(words):
+            decimal_val = int(chunk, 2)
+            word = words[i]
+            df_data.append([f"Word {i+1}", chunk, decimal_val, word])
+    
+    df = pd.DataFrame(df_data, columns=["Order", "11-Bit Binary", "Index (Dec)", "BIP-39 Word"])
+    st.dataframe(df, use_container_width=True)
+    
+    st.success(f"🔑 **FINAL SEED PHRASE:** {mnemonic_str}")
 
-# Create a DataFrame for visualization
-df_data = []
-for i, chunk in enumerate(chunks):
-    decimal_val = int(chunk, 2)
-    word = words[i]
-    df_data.append([f"Word {i+1}", chunk, decimal_val, word])
-
-df = pd.DataFrame(df_data, columns=["Order", "11-Bit Binary", "Index (Dec)", "BIP-39 Word"])
-st.dataframe(df, use_container_width=True)
-
-st.success(f"🔑 **FINAL SEED PHRASE:** {mnemonic_str}")
+except Exception as e:
+    st.error(f"Error generating mnemonic: {e}")
+    st.stop()
 
 # ==========================================
 # 5. BIP-32 HIERARCHY (VISUALIZATION)
@@ -207,64 +230,73 @@ passphrase = st.text_input("Optional Passphrase (Salt):", value="")
 seed_bytes = Bip39SeedGenerator(mnemonic_str).Generate(passphrase)
 seed_hex = binascii.hexlify(seed_bytes).decode()
 
-# Logic for paths
+# Logic for paths (FIXED: Matched Coin Types)
 if "Native Segwit" in network_type:
     purpose = 84
     wrapper = Bip84
+    coin_type = Bip84Coins.BITCOIN
     prefix = "bc1q"
 elif "Taproot" in network_type:
     purpose = 86
     wrapper = Bip86
+    coin_type = Bip86Coins.BITCOIN
     prefix = "bc1p"
 elif "Nested" in network_type:
     purpose = 49
     wrapper = Bip49
+    coin_type = Bip49Coins.BITCOIN
     prefix = "3"
 else:
     purpose = 44
     wrapper = Bip44
+    coin_type = Bip44Coins.BITCOIN
     prefix = "1"
 
 # Derive Keys
-bip_ctx = wrapper.FromSeed(seed_bytes, Bip44Coins.BITCOIN)
-bip_acc = bip_ctx.Purpose().Coin().Account(0)
-bip_change = bip_acc.Change(Bip44Changes.CHAIN_EXT)
-bip_addr = bip_change.AddressIndex(0)
+try:
+    bip_ctx = wrapper.FromSeed(seed_bytes, coin_type)
+    bip_acc = bip_ctx.Purpose().Coin().Account(0)
+    bip_change = bip_acc.Change(Bip44Changes.CHAIN_EXT)
+    bip_addr = bip_change.AddressIndex(0)
+    
+    # Graphviz Tree
+    graph = graphviz.Digraph()
+    graph.attr(bgcolor='#0e1117', fontcolor='white', rankdir='LR')
+    graph.attr('node', style='filled', fillcolor='#1c1f26', color='#00ff41', fontcolor='white', fontname='Courier')
+    graph.attr('edge', color='#00ff41')
+    
+    # Nodes
+    root_label = f"Master Seed\n(512-bit)\n{seed_hex[:16]}..."
+    graph.node('ROOT', root_label, shape='box')
+    
+    purpose_label = f"Purpose\n{purpose}'"
+    graph.node('PURPOSE', purpose_label)
+    
+    coin_label = "Coin\n0' (BTC)"
+    graph.node('COIN', coin_label)
+    
+    account_label = "Account\n0'"
+    graph.node('ACC', account_label)
+    
+    change_label = "Change\n0 (Ext)"
+    graph.node('CHANGE', change_label)
+    
+    addr_label = f"Index 0\n{bip_addr.PublicKey().ToAddress()}"
+    graph.node('ADDR', addr_label, color='#ff00ff', penwidth='2')
+    
+    # Edges
+    graph.edge('ROOT', 'PURPOSE')
+    graph.edge('PURPOSE', 'COIN')
+    graph.edge('COIN', 'ACC')
+    graph.edge('ACC', 'CHANGE')
+    graph.edge('CHANGE', 'ADDR')
+    
+    st.graphviz_chart(graph)
+    st.caption(f"Derivation Path: m / {purpose}' / 0' / 0' / 0 / 0")
 
-# Graphviz Tree
-graph = graphviz.Digraph()
-graph.attr(bgcolor='#0e1117', fontcolor='white', rankdir='LR')
-graph.attr('node', style='filled', fillcolor='#1c1f26', color='#00ff41', fontcolor='white', fontname='Courier')
-graph.attr('edge', color='#00ff41')
-
-# Nodes
-root_label = f"Master Seed\n(512-bit)\n{seed_hex[:16]}..."
-graph.node('ROOT', root_label, shape='box')
-
-purpose_label = f"Purpose\n{purpose}'"
-graph.node('PURPOSE', purpose_label)
-
-coin_label = "Coin\n0' (BTC)"
-graph.node('COIN', coin_label)
-
-account_label = "Account\n0'"
-graph.node('ACC', account_label)
-
-change_label = "Change\n0 (External)"
-graph.node('CHANGE', change_label)
-
-addr_label = f"Index 0\n{bip_addr.PublicKey().ToAddress()}"
-graph.node('ADDR', addr_label, color='#ff00ff', penwidth='2')
-
-# Edges
-graph.edge('ROOT', 'PURPOSE')
-graph.edge('PURPOSE', 'COIN')
-graph.edge('COIN', 'ACC')
-graph.edge('ACC', 'CHANGE')
-graph.edge('CHANGE', 'ADDR')
-
-st.graphviz_chart(graph)
-st.caption(f"Derivation Path: m / {purpose}' / 0' / 0' / 0 / 0")
+except Exception as e:
+    st.error(f"Derivation Error: {e}")
+    st.stop()
 
 # ==========================================
 # 6. ELLIPTIC CURVE MATH (VISUALIZATION)
@@ -286,13 +318,16 @@ with col_graph:
     ax.plot(x, y_pos, 'b', lw=2, color='#00ff41')
     ax.plot(x, y_neg, 'b', lw=2, color='#00ff41')
     
-    # Fake Point P (Just for visualization) based on Entropy first byte
-    rand_idx = int(entropy_bytes[0]) % len(x)
-    px = x[rand_idx]
-    py = y_pos[rand_idx]
-    
-    ax.plot(px, py, 'ro', markersize=8, label='Your Key Point')
-    ax.plot([px, px], [0, py], 'r--', alpha=0.3)
+    # Fake Point P based on Entropy first byte
+    try:
+        rand_idx = int(entropy_bytes[0]) % len(x)
+        px = x[rand_idx]
+        py = y_pos[rand_idx]
+        
+        ax.plot(px, py, 'ro', markersize=8, label='Your Key Point')
+        ax.plot([px, px], [0, py], 'r--', alpha=0.3)
+    except:
+        pass
     
     # Styling Plot
     ax.set_facecolor('#1c1f26')
@@ -326,4 +361,4 @@ with col_keys:
 # FOOTER
 # ==========================================
 st.markdown("---")
-st.markdown("<center><small>Developed for Bitcoin Education | Powered by Python, Streamlit & Docker, Chollatis Maneewong</small></center>", unsafe_allow_html=True)
+st.markdown("<center><small>Developed for Bitcoin Education | Powered by Python, Streamlit & Docker | Chollatis Maneewong</small></center>", unsafe_allow_html=True)
