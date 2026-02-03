@@ -2,3 +2,6 @@ streamlit
 bip_utils
 pandas
 ecdsa
+matplotlib
+graphviz
+numpy
